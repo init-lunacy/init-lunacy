@@ -1,0 +1,45 @@
+# Redraws the profile banner from the latest commit counts every 4 hours.
+# Commits only when the counts changed, so quiet days leave no history.
+name: banner
+
+on:
+  schedule:
+    - cron: "17 */4 * * *"   # off the hour, when Actions is less busy
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: banner
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install numpy==2.1.3 pillow==11.0.0
+
+      # BANNER_TOKEN: a fine-grained token with read-only Contents on the private project repos.
+      - run: python banner/render.py
+        env:
+          GH_TOKEN: ${{ secrets.BANNER_TOKEN }}
+
+      - name: Commit if the counts changed
+        run: |
+          git add banner
+          if git diff --cached --quiet; then
+            echo "No change."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Refresh banner"
+          git push
