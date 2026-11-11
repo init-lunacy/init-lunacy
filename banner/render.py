@@ -6,9 +6,11 @@ next to this file. Run by .github/workflows/banner.yml every few hours.
 
   python banner/render.py            fetch fresh counts, then render
   python banner/render.py --offline  render from banner/data.json only
+  add --force to redraw even when nothing changed
 
 Needs numpy + Pillow. Fetching private repos needs GH_TOKEN with read access to them.
 """
+import hashlib
 import json
 import math
 import os
@@ -19,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 HERE = Path(__file__).resolve().parent
 DATA = HERE / "data.json"
@@ -35,7 +37,7 @@ THEMES = {
     "light": dict(bg=(245, 244, 239), ink=(23, 24, 23), faint=(109, 111, 105), hue=3),
 }
 S = 2                       # render scale; GitHub shows READMEs ~880 px wide
-W, H = 880 * S, 206 * S
+W, H = 880 * S, 150 * S
 WEEKS = 52
 BAYER8 = (np.array([
     0, 32, 8, 40, 2, 34, 10, 42, 48, 16, 56, 24, 50, 18, 58, 26,
@@ -128,99 +130,120 @@ def render(theme, weeks, updated):
     arr = np.zeros((H, W, 3), np.uint8); arr[:] = bg
 
     # Geometry: a prism with some depth; the beam enters its left face, leaves its right.
-    cx, cy, size = 440 * S, 132 * S, 120 * S
+    cx, cy, size = 468 * S, 80 * S, 100 * S
     h = size * math.sqrt(3) / 2
     tri = [(cx, cy - h * 2 / 3), (cx + size / 2, cy + h / 3), (cx - size / 2, cy + h / 3)]
-    depth = (28 * S, -17 * S)
+    depth = (24 * S, -14 * S)
     back = [(x + depth[0], y + depth[1]) for x, y in tri]
     entry = ((tri[0][0] + tri[2][0]) / 2, (tri[0][1] + tri[2][1]) / 2)
     exitp = ((tri[0][0] + tri[1][0]) / 2 + depth[0] * .35, (tri[0][1] + tri[1][1]) / 2 + depth[1] * .35)
-    src = (40 * S, entry[1] + .05 * (entry[0] - 40 * S))
+    slope = .05                                        # the beam rises gently toward the prism
+    src = (40 * S, entry[1] + slope * (entry[0] - 40 * S))
 
     beam(arr, src, entry, 6 * S, 6 * S, .95, .95, ink)
     beam(arr, entry, exitp, 5 * S, 3 * S, .35, .45, ink)   # faintly visible inside the glass
 
-    # Streams: the year's commits as signal along each ray.
+    # Streams: each project's year as a wave, drawn as a dense dithered ribbon in its colour.
+    # The ribbon widens away from the prism, more for projects with more commits that year.
     x_end = W - 40 * S
-    fan = np.linspace(-.11, .11, len(STREAMS))
+    fan = np.linspace(-.12, .12, len(STREAMS))
     peak = max([max(weeks.get(s[0], [0]) or [0]) for s in STREAMS] + [1])
-    img = Image.fromarray(arr)
-    d = ImageDraw.Draw(img)
-    lines = []  # (points, colour) for label collision checks
-    ends = []
+    big = max([sum(weeks.get(s[0], [])) for s in STREAMS] + [1])
+    yy, xx = np.mgrid[0:H, 0:W].astype(float)
+    ribbons, ends = [], []
     for (label, _, *hues), ang in zip(STREAMS, fan):
         hue = hues[0] if theme == "dark" else hues[1]
         series = (weeks.get(label) or [0] * WEEKS)[-WEEKS:]
+        share = math.sqrt(sum(series) / big)
         end = (x_end, exitp[1] + math.tan(ang) * (x_end - exitp[0]))
         L = math.hypot(end[0] - exitp[0], end[1] - exitp[1])
         ux, uy = (end[0] - exitp[0]) / L, (end[1] - exitp[1]) / L
         nx, ny = -uy, ux
-        pts = []
-        for i in range(1100):
-            u = i / 1099
+        m = Image.new("L", (W, H), 0)
+        md = ImageDraw.Draw(m)
+        prev = None
+        for i in range(1200):
+            u = i / 1199
             v = series[min(WEEKS - 1, int(u * WEEKS))]
             a = math.log1p(v) / math.log1p(peak) if v else 0
-            wob = math.sin(u * 260) * a * 9 * S * (.35 + .65 * u)
-            pts.append((exitp[0] + ux * L * u + nx * wob, exitp[1] + uy * L * u + ny * wob))
-        d.line(pts, fill=hue, width=S)
-        lines.append(pts)
+            wob = math.sin(u * 260) * a * 8 * S * (.35 + .65 * u)
+            p = (exitp[0] + ux * L * u + nx * wob, exitp[1] + uy * L * u + ny * wob)
+            if prev:
+                md.line([prev, p], fill=255, width=max(S, round((1.5 + (2 + 5 * share) * u) * S)))
+            prev = p
+        mask = np.asarray(m) > 0
+        u_px = np.clip(((xx - exitp[0]) * ux + (yy - exitp[1]) * uy) / L, 0, 1)
+        dither(arr, mask, .95 - .4 * u_px, hue)
+        ribbons.append(mask)
         ends.append((label, hue, end))
 
-    # The prism, over the beams: dithered faces, crisp front edges.
-    arr = np.array(img)
-    yy = np.mgrid[0:H, 0:W][0].astype(float)
+    # The prism, over the streams: dithered faces, crisp front edges.
     for face, tone in (([tri[0], back[0], back[1], tri[1]], .1), ([tri[2], back[2], back[1], tri[1]], .06)):
         dither(arr, poly_mask(face), np.full((H, W), tone), ink)
     top, bot = tri[0][1], tri[1][1]
-    front = poly_mask(tri)
-    dither(arr, front, .06 + .16 * np.clip((yy - top) / (bot - top), 0, 1), ink)
+    dither(arr, poly_mask(tri), .06 + .16 * np.clip((yy - top) / (bot - top), 0, 1), ink)
     img = Image.fromarray(arr)
     d = ImageDraw.Draw(img)
     for a, b in zip(tri, back):
         d.line([a, b], fill=mix(bg, ink, .5), width=1)
     d.line([back[0], back[1], back[2], back[0]], fill=mix(bg, ink, .35), width=1)
     d.line([tri[0], tri[1], tri[2], tri[0]], fill=ink, width=S)
-    # The beam's last stretch into the glass, redrawn over the front face so it reads as entering.
     d.line([entry, ((entry[0] + exitp[0]) / 2, (entry[1] + exitp[1]) / 2)], fill=mix(bg, ink, .55), width=S)
 
-    # Type.
-    name = font("Archivo-Variable.ttf", 30, width=125)
+    # The name rides the incoming beam, tilted to its angle.
+    name = font("Archivo-Variable.ttf", 25, width=125)
     mono = font("IBMPlexMono-Regular.ttf", 9)
-    d.text((40 * S, 24 * S), "Mohamed M. Elhassan", font=name, fill=ink)
+    text = "Mohamed M. Elhassan"
+    tw = int(d.textlength(text, font=name))
+    pad = 40 * S
+    tm = Image.new("L", (tw + 2 * pad, 3 * pad), 0)
+    ImageDraw.Draw(tm).text((pad, 2 * pad), text, font=name, fill=255, anchor="ls")
+    angle = math.degrees(math.atan(slope))
+    tm = tm.rotate(angle, resample=Image.BICUBIC, center=(pad, 2 * pad))
+    # Baseline sits just above the beam's top edge, starting where the beam starts.
+    bx = src[0] + 2 * S
+    by = src[1] - slope * (bx - src[0]) - 3 * S - 7 * S
+    img.paste(Image.new("RGB", tm.size, ink), (int(bx - pad), int(by - 2 * pad)), tm)
+    d = ImageDraw.Draw(img)
+    name_mask = np.zeros((H, W), bool)
+    x0, y0 = int(bx - pad), int(by - 2 * pad)
+    tmv = np.asarray(tm) > 0
+    ys, xs = np.nonzero(tmv)
+    ok = (ys + y0 >= 0) & (ys + y0 < H) & (xs + x0 >= 0) & (xs + x0 < W)
+    name_mask[ys[ok] + y0, xs[ok] + x0] = True
 
-    # Labels: try a few spots per stream and take the first that touches no line and no other label.
-    ink_mask = Image.new("L", (W, H), 0)
-    md = ImageDraw.Draw(ink_mask)
-    for pts in lines:
-        md.line(pts, fill=255, width=7 * S)   # generous clearance around every stream
-    md.polygon(back + tri, fill=255)
-    taken = np.asarray(ink_mask).copy() > 0
+    # Labels: try spots along each stream; take the first that touches no stream, prism, name or label.
+    clear = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(clear).polygon(back + tri, fill=255)
+    taken = (np.asarray(clear) > 0) | name_mask
+    for mask in ribbons:
+        grown = Image.fromarray((mask * 255).astype(np.uint8)).filter(ImageFilter.MaxFilter(9))
+        taken |= np.asarray(grown) > 0
 
     def free(box):
         x0, y0, x1, y1 = (int(round(v)) for v in box)
-        if x0 < 0 or y0 < 0 or x1 > W or y1 > H:
+        if x0 < 0 or y0 < 2 * S or x1 > W or y1 > H - 2 * S:
             return False
         return not taken[y0:y1, x0:x1].any()
 
+    th = 11 * S
     for label, hue, end in ends:
-        tw = d.textlength(label, font=mono)
-        th = 11 * S
+        lw = d.textlength(label, font=mono)
         cands = []
-        for u in (1.0, .9, .8, .7):        # along the stream, from the end back toward the prism
+        for u in (1.0, .92, .84, .76, .68):     # from the end back toward the prism
             px = exitp[0] + (end[0] - exitp[0]) * u
             py = exitp[1] + (end[1] - exitp[1]) * u
-            for gap in (4, 8, 12):          # above first, then below, as close as fits
+            for gap in (3, 6, 10, 14):          # above, then below, as close as fits
                 g = gap * S
-                cands.append((px - tw, py - g - th, px, py - g))
-                cands.append((px - tw, py + g, px, py + g + th))
+                cands.append((px - lw, py - g - th, px, py - g))
+                cands.append((px - lw, py + g, px, py + g + th))
         box = next((b for b in cands if free(b)), cands[0])
         d.text((box[0], box[1]), label, font=mono, fill=hue)
         x0, y0, x1, y1 = (int(round(v)) for v in box)
         taken[max(0, y0 - 4 * S):y1 + 4 * S, max(0, x0 - 4 * S):x1 + 4 * S] = True
 
-    d.text((40 * S, src[1] + 12 * S), "init-lunacy", font=mono, fill=faint)
     stamp = f"52 weeks of commits · updated {updated}" if updated else "52 weeks of commits"
-    d.text((W - 40 * S - d.textlength(stamp, font=mono), H - 20 * S), stamp, font=mono, fill=faint)
+    d.text((src[0], src[1] + 9 * S), stamp, font=mono, fill=faint)
 
     # Transparent background, so it sits on GitHub's own page colour in either theme.
     a = np.asarray(img)
@@ -229,13 +252,20 @@ def render(theme, weeks, updated):
 
 
 def main():
-    if "--offline" not in sys.argv:
-        refresh()
+    changed = refresh() if "--offline" not in sys.argv else False
     data = json.loads(DATA.read_text())
-    for theme in THEMES:
-        out = HERE / f"banner-{theme}.png"
+    # Re-render only when the counts or this script changed: Pillow output can differ between
+    # machines, and redrawing identical data would otherwise commit a "new" image every run.
+    version = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
+    outs = [HERE / f"banner-{theme}.png" for theme in THEMES]
+    if not changed and data.get("render") == version and all(o.exists() for o in outs) and "--force" not in sys.argv:
+        print("No change.")
+        return
+    for theme, out in zip(THEMES, outs):
         render(theme, data["weeks"], data.get("updated")).save(out, optimize=True)
         print(out.name, out.stat().st_size, "bytes")
+    data["render"] = version
+    DATA.write_text(json.dumps(data, indent=1) + "\n")
 
 
 if __name__ == "__main__":
