@@ -1,0 +1,59 @@
+# A visitor opens an issue titled "poke": count it, redraw the banner with more static, reply, close.
+# The issue's text is never run or echoed; only the poker's login is used, and only as a hash.
+name: poke
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: banner          # shared with banner.yml so two redraws never race on a push
+  cancel-in-progress: false
+
+jobs:
+  poke:
+    if: ${{ startsWith(github.event.issue.title, 'poke') || startsWith(github.event.issue.title, 'Poke') || startsWith(github.event.issue.title, '⚡') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install numpy==2.1.3 pillow==11.0.0
+
+      - id: poke
+        name: Record the poke and redraw
+        env:
+          POKER: ${{ github.event.issue.user.login }}
+        run: python banner/render.py --offline --poke "$POKER"
+
+      - name: Commit if anything changed
+        run: |
+          git add banner
+          if git diff --cached --quiet; then exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Poke"
+          git pull --rebase --quiet
+          git push
+
+      - name: Reply and close
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number }}
+          COUNTED: ${{ steps.poke.outputs.counted }}
+        run: |
+          if [ "$COUNTED" = "true" ]; then
+            msg="⚡ Poked. The prism will crackle a little harder for the next few hours. It can take a few minutes to show."
+          else
+            msg="⚡ Already poked within the last hour, so this one didn't add to it. Thanks though."
+          fi
+          gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body "$msg"
+          gh issue close "$ISSUE" --repo "$GITHUB_REPOSITORY" --reason completed
