@@ -215,9 +215,7 @@ def render(theme, weeks, updated, pokes=0):
             prev = p
         mask = np.asarray(m) > 0
         u_px = np.clip(((xx - exitp[0]) * ux + (yy - exitp[1]) * uy) / L, 0, 1)
-        before = arr.copy()
         dither(arr, mask, .95 - .4 * u_px, hue)
-        geo.setdefault("stream_masks", []).append((arr != before).any(axis=2))
         ribbons.append(mask)
         ends.append((label, hue, end))
         geo["streams"].append({"label": label, "hue": hue, "path": path, "width": (1.5 + 2 + 5 * share) * S})
@@ -323,8 +321,8 @@ def flicker(rng, xs, ys, colour, count, weights=None, fast=False):
 
 def animate(theme, weeks, updated, pokes=0, level=1.0):
     """The banner as an SVG: the rendered image, plus static that crackles in place. Light builds
-    along the beam from the second "s" of Elhassan into the prism, the entry edge crackles where
-    the beam strikes, and the coloured lanes carry a quieter, even static along their length.
+    along the beam from the second "s" of Elhassan into the prism, and the entry edge crackles
+    where the beam strikes. The coloured lanes stay still.
     CSS only (GitHub strips scripts), and it all stops for prefers-reduced-motion."""
     img, geo = render(theme, weeks, updated, pokes)
     a = np.asarray(img)
@@ -334,16 +332,7 @@ def animate(theme, weeks, updated, pokes=0, level=1.0):
     gy, gx = np.mgrid[0:H, 0:W]
     grid = (gy % S == 0) & (gx % S == 0)               # one sample per dither cell
     lit = (a[..., :3] == ink).all(axis=2) & (a[..., 3] > 0)
-    inside = poly_mask(geo["prism"])
     cells = []
-
-    # Lanes: even static along each whole lane, in its own colour.
-    for st, m in zip(geo["streams"], geo["stream_masks"]):
-        m = m & ~inside
-        halo = np.asarray(Image.fromarray((m * 255).astype(np.uint8)).filter(ImageFilter.MaxFilter(5))) > 0
-        for pool, colour, rate in ((m & grid, bg, .07), (halo & ~m & grid & ~inside, st["hue"], .032)):
-            ys, xs = np.nonzero(pool)
-            cells += flicker(rng, xs, ys, colour, int(len(xs) * rate * amount))
 
     # Beam: starts after the second "s" of Elhassan (the name rides the beam), builds into the glass.
     (x0, y0), (x1, y1) = geo["src"], geo["entry"]
