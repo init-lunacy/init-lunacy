@@ -5,7 +5,7 @@
   </picture>
 </a>
 
-Electrical engineering at MSU Denver. Lead System Architect at Qureway since 2023.
+Electrical engineering at MSU Denver.
 Building [MDMesh](https://github.com/MDMesh-app/MDMesh), CredPlot, RouteSpine and Biolair.
 
 **[mohames.com](https://mohames.com)** · <sub>[⚡ poke the prism](https://github.com/init-lunacy/init-lunacy/issues/new?title=poke&body=%E2%9A%A1)</sub>
